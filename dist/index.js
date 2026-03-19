@@ -17,6 +17,7 @@ const MONGO_URI = process.env.MONGO_URI ||
 const client = new MongoClient(MONGO_URI);
 let db;
 const roomConfigs = () => db.collection("rooms");
+const templates = () => db.collection("templates");
 const ROOM_SUMMARY_PROJECTION = {
     _id: 1,
     "config.campus": 1,
@@ -27,6 +28,8 @@ const ROOM_SUMMARY_PROJECTION = {
     "config.version": 1,
     "config.updatedAt": 1,
     "config.updatedBy": 1,
+    "config.sla": 1,
+    "config.slaExpireAt": 1,
 };
 const users = () => db.collection("users");
 function hashPasswordScrypt(password) {
@@ -304,6 +307,20 @@ app.put("/rooms/:roomId", { preHandler: requireAnyRole(["admin", "editor"]) }, a
     const result = await upsertRoomConfig({ roomId, incoming, updatedBy });
     return { success: true, roomId: result.roomId, version: result.version };
 });
+app.get("/templates", async () => {
+    return templates()
+        .find({}, { projection: { _id: 1, name: 1, icon: 1, createdby: 1, created: 1, permission: 1 } })
+        .sort({ name: 1 })
+        .toArray();
+});
+app.get("/templates/:id", async (request, reply) => {
+    const { id } = request.params;
+    const doc = await templates().findOne({ _id: id });
+    if (!doc) {
+        return reply.code(404).send({ error: "Template not found" });
+    }
+    return doc;
+});
 app.delete("/rooms/:roomId", { preHandler: requireRole("admin") }, async (request, reply) => {
     const { roomId } = request.params;
     const res = await roomConfigs().deleteOne({ _id: roomId });
@@ -325,6 +342,8 @@ const start = async () => {
     await roomConfigs().createIndex({ "config.campus": 1, "config.building": 1, "config.room": 1 });
     // Users index (idempotent)
     await users().createIndex({ "user.username": 1 }, { unique: true });
+    // Templates index (idempotent — _id is the template name)
+    await templates().createIndex({ _id: 1 });
     // Bootstrap default app users (idempotent)
     await ensureDefaultUsers();
     await app.listen({ port: 8080, host: "0.0.0.0" });
