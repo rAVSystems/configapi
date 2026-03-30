@@ -4,6 +4,7 @@ import cors from "@fastify/cors";
 import { Db, MongoClient } from "mongodb";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
+import Anthropic from "@anthropic-ai/sdk";
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
@@ -459,6 +460,58 @@ app.put("/rooms/:roomId", { preHandler: requireAnyRole(["admin", "editor"]) }, a
   return { success: true, roomId: result.roomId, version: result.version };
 });
 
+// ----- Streams -----
+
+const MEDIAMTX_HOST = process.env.MEDIAMTX_HOST || "192.168.1.225";
+const MEDIAMTX_WEBRTC_PORT = process.env.MEDIAMTX_WEBRTC_PORT || "8889";
+const MEDIAMTX_HLS_PORT = process.env.MEDIAMTX_HLS_PORT || "8888";
+
+app.get("/rooms/:roomId/streams", async (request, reply) => {
+  const { roomId } = request.params as { roomId: string };
+  const room = await roomConfigs().findOne({ _id: roomId }, { projection: { _id: 1, config: 1 } });
+
+  if (!room) {
+    return reply.code(404).send({ error: "Room not found" });
+  }
+
+  const devices = (room.config.Devices ?? {}) as Record<string, any>;
+  const streams: { name: string; rtsp: string; webrtc: string; hls: string }[] = [];
+
+  for (const [key, device] of Object.entries(devices)) {
+    const rtspUrl: string | undefined = device.RtspUrl;
+    if (!rtspUrl) continue;
+
+    const pathName = `${roomId}/${key}`.toLowerCase().replace(/[^a-z0-9/_-]/g, "-");
+
+    streams.push({
+      name: device.FriendlyName ?? key,
+      rtsp: rtspUrl,
+      webrtc: `http://${MEDIAMTX_HOST}:${MEDIAMTX_WEBRTC_PORT}/${pathName}`,
+      hls: `http://${MEDIAMTX_HOST}:${MEDIAMTX_HLS_PORT}/${pathName}`,
+    });
+  }
+
+  return { roomId, streams };
+});
+
+app.post("/templates", { preHandler: requireAnyRole(["admin", "editor"]) }, async (request, reply) => {
+  const body = request.body as any;
+  if (!body?.name) return reply.code(400).send({ error: "name is required" });
+
+  const doc: TemplateDoc = {
+    _id: uuidv4(),
+    name: body.name,
+    icon: body.icon ?? "description",
+    createdby: request.user.username,
+    created: new Date().toISOString(),
+    permission: body.permission ?? "private",
+    config: body.config ?? {},
+  };
+
+  await templates().insertOne(doc);
+  return reply.code(201).send({ success: true, _id: doc._id });
+});
+
 app.get("/templates", async () => {
   return templates()
     .find({}, { projection: { _id: 1, name: 1, icon: 1, createdby: 1, created: 1, permission: 1 } })
@@ -475,6 +528,115 @@ app.get("/templates/:id", async (request, reply) => {
   return doc;
 });
 
+// ── Admin: User Management ───────────────────────────────────────────────────
+
+app.get("/admin/users", { preHandler: requireRole("admin") }, async () => {
+  const docs = await users()
+    .find({}, {
+      projection: {
+        _id: 1,
+        "user.username": 1,
+        "user.roles": 1,
+        "user.isActive": 1,
+        "user.createdAt": 1,
+        "user.lastLoginAt": 1,
+      } as any,
+    })
+    .sort({ "user.username": 1 })
+    .toArray();
+
+  return docs.map((d) => ({
+    _id: d._id,
+    username: d.user.username,
+    roles: d.user.roles,
+    isActive: d.user.isActive,
+    createdAt: d.user.createdAt,
+    lastLoginAt: d.user.lastLoginAt ?? null,
+  }));
+});
+
+app.patch("/admin/users/:id/roles", { preHandler: requireRole("admin") }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as any;
+  const roles: ("admin" | "editor" | "viewer")[] = body?.roles;
+
+  const validRoles = ["admin", "editor", "viewer"];
+  if (!Array.isArray(roles) || roles.length === 0 || roles.some((r) => !validRoles.includes(r))) {
+    return reply.code(400).send({ error: "roles must be a non-empty array of admin|editor|viewer" });
+  }
+
+  const res = await users().updateOne(
+    { _id: id },
+    { $set: { "user.roles": roles, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  return { success: true };
+});
+
+app.patch("/admin/users/:id/username", { preHandler: requireRole("admin") }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as any;
+  const username = String(body?.username ?? "").trim();
+
+  if (!username || username.length < 3 || username.length > 50) {
+    return reply.code(400).send({ error: "Username must be 3-50 characters" });
+  }
+
+  const existing = await users().findOne(
+    { "user.username": username },
+    { projection: { _id: 1 } as any }
+  );
+  if (existing && existing._id !== id) {
+    return reply.code(409).send({ error: "Username already taken" });
+  }
+
+  const res = await users().updateOne(
+    { _id: id },
+    { $set: { "user.username": username, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  return { success: true };
+});
+
+app.patch("/admin/users/:id/password", { preHandler: requireRole("admin") }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as any;
+  const password = String(body?.password ?? "");
+
+  if (!password || password.length < 8 || password.length > 200) {
+    return reply.code(400).send({ error: "Password must be at least 8 characters" });
+  }
+
+  const passwordHash = hashPasswordScrypt(password);
+
+  const res = await users().updateOne(
+    { _id: id },
+    { $set: { "user.passwordHash": passwordHash, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  return { success: true };
+});
+
+app.patch("/admin/users/:id/active", { preHandler: requireRole("admin") }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as any;
+
+  if (typeof body?.isActive !== "boolean") {
+    return reply.code(400).send({ error: "isActive must be a boolean" });
+  }
+
+  const res = await users().updateOne(
+    { _id: id },
+    { $set: { "user.isActive": body.isActive, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  return { success: true };
+});
+
 app.delete("/rooms/:roomId", { preHandler: requireRole("admin") }, async (request, reply) => {
   const { roomId } = request.params as { roomId: string };
 
@@ -484,6 +646,144 @@ app.delete("/rooms/:roomId", { preHandler: requireRole("admin") }, async (reques
   }
 
   return { success: true, roomId };
+});
+
+// ── Rick AI Chat ────────────────────────────────────────────────────────────
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+const RICK_SYSTEM_PROMPT = `You are Rick, an AI assistant embedded in an AV room configuration portal.
+Your ONLY job is to help users edit AV room config settings by calling the provided tools.
+You must ALWAYS respond with a short, friendly plain-text message describing what you did or why you can't do something.
+You must NEVER answer general questions unrelated to room config.
+If a request is unclear, ask a clarifying question.
+When making changes, call the appropriate tool(s) and also include a text response explaining what you changed.`;
+
+const RICK_TOOLS: Anthropic.Tool[] = [
+  {
+    name: "set_system_setting",
+    description: "Set a top-level system setting field such as ip, roomType, sla, slaExpireAt, campus",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        field: { type: "string", description: "The field name, e.g. 'ip', 'roomType', 'sla'" },
+        value: { type: "string", description: "The new value" },
+      },
+      required: ["field", "value"],
+    },
+  },
+  {
+    name: "set_source_field",
+    description: "Set a field on a source, e.g. Label, Icon, IconSelected, Group, AutoStart, AutoShutdown, IsInvisible",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        sourceKey: { type: "string", description: "The source key, e.g. 'Source_1_Btn'" },
+        field: { type: "string", description: "The field to set, e.g. 'Label', 'Icon', 'IsInvisible'" },
+        value: { description: "The new value" },
+      },
+      required: ["sourceKey", "field", "value"],
+    },
+  },
+  {
+    name: "set_device_field",
+    description: "Set a field on a device, e.g. FriendlyName, IpAddress, Make, Model, ControlType",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        deviceKey: { type: "string", description: "The device key, e.g. 'Proj-1'" },
+        field: { type: "string", description: "The field to set, e.g. 'IpAddress', 'FriendlyName'" },
+        value: { description: "The new value" },
+      },
+      required: ["deviceKey", "field", "value"],
+    },
+  },
+  {
+    name: "set_gain_field",
+    description: "Set a field on a gain/audio channel, e.g. Label, Min, Max, IsInvisible, MuteLabel",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        gainKey: { type: "string", description: "The gain key, e.g. 'ProgGain'" },
+        field: { type: "string", description: "The field to set" },
+        value: { description: "The new value" },
+      },
+      required: ["gainKey", "field", "value"],
+    },
+  },
+  {
+    name: "set_page_field",
+    description: "Set a field on a page, e.g. Title, Subtitle, Description, Image",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        pageId: { type: "string", description: "The page Id, e.g. 'HomePage'" },
+        field: { type: "string", description: "The field to set" },
+        value: { description: "The new value" },
+      },
+      required: ["pageId", "field", "value"],
+    },
+  },
+  {
+    name: "set_component_field",
+    description: "Set a field on a component within a page, e.g. IsInvisible, or a property value",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        pageId: { type: "string", description: "The page Id containing the component" },
+        componentKey: { type: "string", description: "The component key, e.g. 'RoomName'" },
+        field: { type: "string", description: "The field to set, e.g. 'IsInvisible' or a property key like 'String'" },
+        value: { description: "The new value" },
+      },
+      required: ["pageId", "componentKey", "field", "value"],
+    },
+  },
+];
+
+type RickMessage = { role: "user" | "assistant"; content: string };
+
+app.post("/rick/chat", { preHandler: requireAuth }, async (request, reply) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return reply.code(503).send({ error: "AI assistant is not configured (missing ANTHROPIC_API_KEY)" });
+  }
+
+  const body = request.body as any;
+  const messages: RickMessage[] = body?.messages ?? [];
+  const config: Record<string, unknown> = body?.config ?? {};
+
+  if (!messages.length) {
+    return reply.code(400).send({ error: "messages array is required" });
+  }
+
+  // Inject current config as context in the first user message
+  const configContext = `\nCurrent room config:\n${JSON.stringify(config, null, 2)}\n`;
+  const apiMessages: Anthropic.MessageParam[] = messages.map((m, i) => ({
+    role: m.role,
+    content: i === 0 && m.role === "user" ? configContext + m.content : m.content,
+  }));
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 1024,
+    system: RICK_SYSTEM_PROMPT,
+    tools: RICK_TOOLS,
+    messages: apiMessages,
+  });
+
+  // Extract text and tool calls from response
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join(" ");
+
+  const toolCalls = response.content
+    .filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use")
+    .map((b) => ({ name: b.name, input: b.input }));
+
+  return { text, toolCalls };
 });
 
 const start = async () => {

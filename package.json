@@ -7,6 +7,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "deploy:pi": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\"",
+    "deploy:stack": "rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d && docker compose restart mediamtx\"",
+    "deploy:all": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build\"",
     "sync:pi": "rsync -av --delete ./ admin@192.168.1.225:~/av/api/",
     "rebuild:pi": "ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\""
   },
@@ -15,6 +17,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",
     "fastify": "^5.7.4",

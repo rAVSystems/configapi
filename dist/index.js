@@ -307,6 +307,32 @@ app.put("/rooms/:roomId", { preHandler: requireAnyRole(["admin", "editor"]) }, a
     const result = await upsertRoomConfig({ roomId, incoming, updatedBy });
     return { success: true, roomId: result.roomId, version: result.version };
 });
+// ----- Streams -----
+const MEDIAMTX_HOST = process.env.MEDIAMTX_HOST || "192.168.1.225";
+const MEDIAMTX_WEBRTC_PORT = process.env.MEDIAMTX_WEBRTC_PORT || "8889";
+const MEDIAMTX_HLS_PORT = process.env.MEDIAMTX_HLS_PORT || "8888";
+app.get("/rooms/:roomId/streams", async (request, reply) => {
+    const { roomId } = request.params;
+    const room = await roomConfigs().findOne({ _id: roomId }, { projection: { _id: 1, config: 1 } });
+    if (!room) {
+        return reply.code(404).send({ error: "Room not found" });
+    }
+    const devices = (room.config.Devices ?? {});
+    const streams = [];
+    for (const [key, device] of Object.entries(devices)) {
+        const rtspUrl = device.RtspUrl;
+        if (!rtspUrl)
+            continue;
+        const pathName = `${roomId}/${key}`.toLowerCase().replace(/[^a-z0-9/_-]/g, "-");
+        streams.push({
+            name: device.FriendlyName ?? key,
+            rtsp: rtspUrl,
+            webrtc: `http://${MEDIAMTX_HOST}:${MEDIAMTX_WEBRTC_PORT}/${pathName}`,
+            hls: `http://${MEDIAMTX_HOST}:${MEDIAMTX_HLS_PORT}/${pathName}`,
+        });
+    }
+    return { roomId, streams };
+});
 app.get("/templates", async () => {
     return templates()
         .find({}, { projection: { _id: 1, name: 1, icon: 1, createdby: 1, created: 1, permission: 1 } })
