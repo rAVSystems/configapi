@@ -29,7 +29,7 @@ type RoomConfigDoc = {
   config: RoomConfig;
 };
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: true, bodyLimit: 10485760 }); // 10MB
 
 // CORS (needed for browser-based clients like the Angular portal)
 // Register early so preflight OPTIONS always gets the right headers.
@@ -460,6 +460,27 @@ app.put("/rooms/:roomId", { preHandler: requireAnyRole(["admin", "editor"]) }, a
   return { success: true, roomId: result.roomId, version: result.version };
 });
 
+// ----- Sync -----
+
+// Tracks rooms that have a pending sync request.
+// The QSys core polls GET /rooms/:roomId/sync-status and clears it once synced.
+const pendingSyncs = new Set<string>();
+
+app.post("/rooms/:roomId/sync", { preHandler: requireAnyRole(["admin", "editor"]) }, async (request, reply) => {
+  const { roomId } = request.params as { roomId: string };
+  const room = await roomConfigs().findOne({ _id: roomId }, { projection: { _id: 1 } });
+  if (!room) return reply.code(404).send({ error: "Room not found" });
+  pendingSyncs.add(roomId);
+  return { success: true, roomId };
+});
+
+app.get("/rooms/:roomId/sync-status", { preHandler: requireAuth }, async (request, reply) => {
+  const { roomId } = request.params as { roomId: string };
+  const pending = pendingSyncs.has(roomId);
+  if (pending) pendingSyncs.delete(roomId);
+  return { roomId, syncRequested: pending };
+});
+
 // ----- Streams -----
 
 const MEDIAMTX_HOST = process.env.MEDIAMTX_HOST || "192.168.1.225";
@@ -504,7 +525,7 @@ app.post("/templates", { preHandler: requireAnyRole(["admin", "editor"]) }, asyn
     icon: body.icon ?? "description",
     createdby: request.user.username,
     created: new Date().toISOString(),
-    permission: body.permission ?? "private",
+    permission: body.permission ?? "user",
     config: body.config ?? {},
   };
 
@@ -526,6 +547,101 @@ app.get("/templates/:id", async (request, reply) => {
     return reply.code(404).send({ error: "Template not found" });
   }
   return doc;
+});
+
+app.patch("/templates/:id", { preHandler: requireAnyRole(["admin", "editor", "viewer"]) }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as { name?: string; permission?: string; config?: any };
+  const isAdmin = request.user.roles.includes("admin");
+
+  const doc = await templates().findOne({ _id: id });
+  if (!doc) return reply.code(404).send({ error: "Template not found" });
+
+  // Non-admins can only edit their own templates, and cannot change permission
+  if (!isAdmin) {
+    if (doc.createdby !== request.user.username) {
+      return reply.code(403).send({ error: "Not authorized to edit this template" });
+    }
+    if (body.permission !== undefined) {
+      return reply.code(403).send({ error: "Only admins can change template permission" });
+    }
+  }
+
+  const update: any = {};
+  if (body.name !== undefined) update.name = body.name;
+  if (body.permission !== undefined) update.permission = body.permission;
+  if (body.config !== undefined) update.config = body.config;
+if (Object.keys(update).length === 0) return reply.code(400).send({ error: "Nothing to update" });
+  await templates().updateOne({ _id: id }, { $set: update });
+  return { success: true };
+});
+
+app.delete("/templates/:id", { preHandler: requireAnyRole(["admin", "editor", "viewer"]) }, async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const isAdmin = request.user.roles.includes("admin");
+
+  const doc = await templates().findOne({ _id: id });
+  if (!doc) return reply.code(404).send({ error: "Template not found" });
+
+  if (!isAdmin && doc.createdby !== request.user.username) {
+    return reply.code(403).send({ error: "Not authorized to delete this template" });
+  }
+
+  if (!isAdmin && doc.permission === "admin") {
+    return reply.code(403).send({ error: "This template has been promoted to admin-only and cannot be deleted by its creator" });
+  }
+
+  await templates().deleteOne({ _id: id });
+  return { success: true };
+});
+
+// ── Self-service profile ──────────────────────────────────────────────────────
+
+app.patch("/auth/me/username", { preHandler: requireAnyRole(["admin", "editor", "viewer"]) }, async (request, reply) => {
+  const body = request.body as any;
+  const username = String(body?.username ?? "").trim();
+
+  if (!username || username.length < 3 || username.length > 50) {
+    return reply.code(400).send({ error: "Username must be 3-50 characters" });
+  }
+
+  const existing = await users().findOne({ "user.username": username }, { projection: { _id: 1 } as any });
+  if (existing && existing._id !== request.user.sub) {
+    return reply.code(409).send({ error: "Username already taken" });
+  }
+
+  const res = await users().updateOne(
+    { _id: request.user.sub },
+    { $set: { "user.username": username, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  const token = await reply.jwtSign({ sub: request.user.sub, username, roles: request.user.roles });
+  return reply.send({ token, user: { username, roles: request.user.roles } });
+});
+
+app.patch("/auth/me/password", { preHandler: requireAnyRole(["admin", "editor", "viewer"]) }, async (request, reply) => {
+  const body = request.body as any;
+  const password = String(body?.password ?? "");
+
+  if (!password || password.length < 8 || password.length > 200) {
+    return reply.code(400).send({ error: "Password must be at least 8 characters" });
+  }
+
+  const passwordHash = hashPasswordScrypt(password);
+  const res = await users().updateOne(
+    { _id: request.user.sub },
+    { $set: { "user.passwordHash": passwordHash, "user.updatedAt": new Date() } }
+  );
+  if (res.matchedCount === 0) return reply.code(404).send({ error: "User not found" });
+
+  return { success: true };
+});
+
+app.get("/templates/mine", { preHandler: requireAnyRole(["admin", "editor", "viewer"]) }, async (request) => {
+  return templates()
+    .find({ createdby: request.user.username }, { projection: { _id: 1, name: 1, icon: 1, createdby: 1, created: 1, permission: 1 } })
+    .toArray();
 });
 
 // ── Admin: User Management ───────────────────────────────────────────────────

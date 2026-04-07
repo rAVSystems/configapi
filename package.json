@@ -10,7 +10,8 @@
     "deploy:stack": "rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d && docker compose restart mediamtx\"",
     "deploy:all": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build\"",
     "sync:pi": "rsync -av --delete ./ admin@192.168.1.225:~/av/api/",
-    "rebuild:pi": "ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\""
+    "rebuild:pi": "ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\"",
+    "deploy:local": "cd .. && docker compose up -d --build api"
   },
   "keywords": [],
   "author": "",
