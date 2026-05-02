@@ -11,24 +11,26 @@
     "deploy:all": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build\"",
     "sync:pi": "rsync -av --delete ./ admin@192.168.1.225:~/av/api/",
     "rebuild:pi": "ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\"",
-    "deploy:local": "cd .. && docker compose up -d --build api"
+    "deploy:local": "cd .. && docker compose up -d --build"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.80.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",
     "fastify": "^5.7.4",
     "mongodb": "^7.1.0",
-    "uuid": "^13.0.0"
+    "mqtt": "^5.15.1",
+    "uuid": "^13.0.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.2.3",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
