@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh admin@192.168.1.225 \"cd ~/av && docker compose ps && echo '---' && docker compose logs openclaw --tail=30\")",
+      "Bash(ssh -o ConnectTimeout=5 -o PasswordAuthentication=yes admin@192.168.1.225 \"docker ps -a | grep -E 'openclaw|hermes'\")",
+      "Bash(docker run *)",
+      "Bash(docker volume *)",
+      "Bash(docker restart *)",
+      "Bash(python3 -c \"import json,sys; h=json.load\\(sys.stdin\\); print\\('channels:', h['channels']\\); print\\('eventLoop degraded:', h['eventLoop']['degraded']\\); print\\('utilization:', h['eventLoop']['utilization']\\)\")",
+      "Bash(docker stats *)",
+      "Bash(mkdir -p /Users/ryan/av-stack/api/src/routes)"
+    ],
+    "additionalDirectories": [
+      "/Users/ryan/av-stack/api/src"
+    ]
+  }
+}

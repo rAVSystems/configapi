@@ -7,11 +7,11 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "deploy:pi": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\"",
-    "deploy:stack": "rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d && docker compose restart mediamtx\"",
-    "deploy:all": "npm run build && rsync -av --delete ./ admin@192.168.1.225:~/av/api/ && rsync -av ../docker-compose.yml ../mediamtx.yml admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build\"",
+    "deploy:stack": "rsync -av --exclude='.env' --exclude='api/' ../docker-compose.yml ../mediamtx.yml ../mosquitto/ ../mongo/ ../scheduler/ admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build && docker compose restart mediamtx\"",
+    "deploy:all": "npm run build && rsync -av --delete --exclude='.git' --exclude='node_modules' --exclude='.env' ../ admin@192.168.1.225:~/av/ && ssh admin@192.168.1.225 \"cd ~/av && [ ! -f .env ] && cp .env.defaults .env; docker stop av-hermes 2>/dev/null; docker rm av-hermes 2>/dev/null; docker compose up -d --build\"",
     "sync:pi": "rsync -av --delete ./ admin@192.168.1.225:~/av/api/",
     "rebuild:pi": "ssh admin@192.168.1.225 \"cd ~/av && docker compose up -d --build api\"",
-    "deploy:local": "cd .. && docker compose up -d --build"
+    "deploy:local": "npm run build && cd ../webapp/portal && npm run build && cd ../.. && docker compose up -d --build"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +20,9 @@
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",
+    "@types/js-yaml": "^4.0.9",
     "fastify": "^5.7.4",
+    "js-yaml": "^4.1.1",
     "mongodb": "^7.1.0",
     "mqtt": "^5.15.1",
     "uuid": "^13.0.0",
