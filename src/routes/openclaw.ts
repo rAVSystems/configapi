@@ -45,12 +45,19 @@ const OPENCLAW_MODELS = [
 export async function openclawRoutes(app: FastifyInstance) {
   app.get("/openclaw/status", { preHandler: requireRole("admin") }, async () => {
     try {
-      const { stdout } = await runInContainer("openclaw gateway health --json 2>/dev/null || echo '{\"running\":false}'");
+      const [healthResult, versionResult] = await Promise.allSettled([
+        runInContainer("openclaw gateway health --json 2>/dev/null || echo '{\"running\":false}'"),
+        runInContainer("openclaw --version 2>/dev/null"),
+      ]);
       let health: any = { running: false };
-      try { health = JSON.parse(stdout); health.running = true; } catch { /* not running */ }
-      return { running: health.running, health };
+      if (healthResult.status === "fulfilled") {
+        try { health = JSON.parse(healthResult.value.stdout); health.running = true; } catch { /* not running */ }
+      }
+      const versionRaw = versionResult.status === "fulfilled" ? versionResult.value.stdout : "";
+      const version = versionRaw.replace(/^OpenClaw\s*/i, "").trim() || null;
+      return { running: health.running, health, version };
     } catch {
-      return { running: false };
+      return { running: false, version: null };
     }
   });
 
